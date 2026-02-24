@@ -38,12 +38,11 @@ penn_trips <- trips_tbl |>
 # --- Identify BAL and WAS stop_ids ---
 # Baltimore Penn Station and Washington Union Station
 bal_stops <- stops |>
-  filter(grepl("Baltimore", stop_name, ignore.case = TRUE) &
-           grepl("Penn", stop_name, ignore.case = TRUE))
+  filter(grepl("Baltimore", stop_name, ignore.case = TRUE))
 
 was_stops <- stops |>
-  filter(grepl("Washington", stop_name, ignore.case = TRUE) |
-           grepl("Union Station", stop_name, ignore.case = TRUE))
+  filter(grepl("Union Station", stop_name, ignore.case = TRUE) &
+           grepl("Washington", stop_name, ignore.case = TRUE))
 
 cat("Baltimore stop candidates:\n"); print(bal_stops[, c("stop_id", "stop_name")])
 cat("Washington stop candidates:\n"); print(was_stops[, c("stop_id", "stop_name")])

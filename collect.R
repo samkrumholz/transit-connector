@@ -101,13 +101,12 @@ tryCatch({
 
         # Identify BAL and WAS stop_ids from ref
         bal_ids <- marc_stops |>
-          filter(grepl("Baltimore", stop_name, ignore.case = TRUE) &
-                   grepl("Penn", stop_name, ignore.case = TRUE)) |>
+          filter(grepl("Baltimore", stop_name, ignore.case = TRUE)) |>
           pull(stop_id)
 
         was_ids <- marc_stops |>
-          filter(grepl("Washington", stop_name, ignore.case = TRUE) |
-                   grepl("Union Station", stop_name, ignore.case = TRUE)) |>
+          filter(grepl("Union Station", stop_name, ignore.case = TRUE) &
+                   grepl("Washington", stop_name, ignore.case = TRUE)) |>
           pull(stop_id)
 
         target_stops <- c(bal_ids, was_ids)
