@@ -2,8 +2,8 @@ name: Collect
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # every 10 minutes; collect.R exits if outside window
-  workflow_dispatch:           # allow manual trigger from Actions tab
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
 
 jobs:
   collect:
@@ -16,18 +16,11 @@ jobs:
         with:
           use-public-rspm: true
 
-      - name: Cache R packages
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.R_LIBS_USER }}
-          key: r-pkgs-v1-${{ hashFiles('collect.R') }}
-          restore-keys: r-pkgs-v1-
-
       - name: Install packages
         run: |
           Rscript -e 'install.packages(
             c("tidytransit", "httr2", "jsonlite", "dplyr", "readr", "lubridate"),
-            repos = "https://cloud.r-project.org"
+            repos = "https://packagemanager.posit.co/cran/__linux__/jammy/latest"
           )'
 
       - name: Collect

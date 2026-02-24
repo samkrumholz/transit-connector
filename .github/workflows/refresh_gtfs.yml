@@ -3,7 +3,7 @@ name: Refresh GTFS
 on:
   schedule:
     - cron: '0 6 * * 0'    # Sundays at 6:00 AM UTC
-  workflow_dispatch:         # allow manual trigger from Actions tab
+  workflow_dispatch:
 
 jobs:
   refresh:
@@ -16,18 +16,11 @@ jobs:
         with:
           use-public-rspm: true
 
-      - name: Cache R packages
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.R_LIBS_USER }}
-          key: r-pkgs-v1-${{ hashFiles('identify_trips.R') }}
-          restore-keys: r-pkgs-v1-
-
       - name: Install packages
         run: |
           Rscript -e 'install.packages(
             c("httr2", "readr", "dplyr"),
-            repos = "https://cloud.r-project.org"
+            repos = "https://packagemanager.posit.co/cran/__linux__/jammy/latest"
           )'
 
       - name: Identify Penn Line trips
