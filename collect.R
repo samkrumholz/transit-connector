@@ -93,7 +93,7 @@ collect_once <- function() {
           marc_rows <- stu_target |>
             transmute(
               service      = "marc",
-              route_id     = coalesce(route_id, NA_character_),
+              route_id     = as.character(route_id),
               trip_id      = trip_id,
               trip_date    = service_date,
               stop_id      = stop_id,
