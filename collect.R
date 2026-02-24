@@ -82,6 +82,7 @@ collect_once <- function() {
         }
 
         stu_target <- stu |>
+          select(-route_id) |>
           filter(trip_id %in% marc_trips$trip_id,
                  stop_id %in% c(bal_ids, was_ids)) |>
           left_join(marc_stops |> select(stop_id, stop_name) |>
