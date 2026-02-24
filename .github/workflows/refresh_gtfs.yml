@@ -1,0 +1,42 @@
+name: Refresh GTFS
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'    # Sundays at 6:00 AM UTC
+  workflow_dispatch:         # allow manual trigger from Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: r-pkgs-v1-${{ hashFiles('identify_trips.R') }}
+          restore-keys: r-pkgs-v1-
+
+      - name: Install packages
+        run: |
+          Rscript -e 'install.packages(
+            c("httr2", "readr", "dplyr"),
+            repos = "https://cloud.r-project.org"
+          )'
+
+      - name: Identify Penn Line trips
+        run: Rscript identify_trips.R
+
+      - name: Commit ref files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ref/
+          git diff --staged --quiet || git commit -m "refresh GTFS $(date -u +%FT%TZ)"
+          git push
