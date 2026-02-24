@@ -20,16 +20,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/share/pak
-          key: r-pak-${{ runner.os }}-v2
+          key: r-pak-${{ runner.os }}-v3
           restore-keys: r-pak-${{ runner.os }}-
 
-      - name: Install packages
+      - name: Install R packages
         run: |
           Rscript -e '
             if (!requireNamespace("pak", quietly = TRUE))
               install.packages("pak", repos = "https://r-lib.github.io/p/pak/stable/")
-            pak::pkg_install(c("tidytransit", "httr2", "jsonlite", "dplyr", "readr", "lubridate"))
+            pak::pkg_install(c("httr2", "jsonlite", "dplyr", "readr", "lubridate"))
           '
+
+      - name: Install Python GTFS-RT parser
+        run: pip install gtfs-realtime-bindings
 
       - name: Collect
         run: Rscript collect.R

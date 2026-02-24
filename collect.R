@@ -7,7 +7,6 @@ suppressPackageStartupMessages({
   library(httr2)
   library(readr)
   library(dplyr)
-  library(tidytransit)
   library(jsonlite)
   library(lubridate)
 })
@@ -51,55 +50,45 @@ collect_once <- function() {
 
   cat("\n--- Poll at", format(now, "%H:%M:%S UTC"), "---\n")
 
-  # --- MARC ---
-  marc_url <- "https://mdotmta-gtfs-rt.s3.amazonaws.com/MARC+RT/marc-tu.pb"
+  # --- MARC (parsed via Python gtfs-realtime-bindings) ---
   tryCatch({
-    resp      <- request(marc_url) |> req_timeout(30) |> req_perform()
-    raw_bytes <- resp_body_raw(resp)
-
-    if (length(raw_bytes) <= 20L) {
-      cat("MARC feed empty (", length(raw_bytes), "bytes).\n")
-    } else if (!file.exists("ref/marc_trips.csv")) {
+    if (!file.exists("ref/marc_trips.csv")) {
       cat("MARC: ref/marc_trips.csv missing — skipping.\n")
     } else {
       marc_trips <- read_csv("ref/marc_trips.csv", show_col_types = FALSE)
       marc_stops <- read_csv("ref/marc_stops.csv", show_col_types = FALSE)
 
-      tmp_pb <- tempfile(fileext = ".pb")
-      writeBin(raw_bytes, tmp_pb)
+      py_out <- system2("python3", "parse_gtfs_rt.py", stdout = TRUE, stderr = FALSE)
 
-      feed <- tryCatch(
-        gtfs_rt_entities(tmp_pb, entity_type = "tu"),
-        error = function(e) tidytransit::read_gtfs_rt(marc_url, entity_type = "tu")
-      )
+      if (length(py_out) <= 1L) {
+        cat("MARC: feed empty or parse produced no rows.\n")
+      } else {
+        stu <- read_csv(paste(py_out, collapse = "\n"), show_col_types = FALSE,
+                        col_types = cols(.default = col_character()))
 
-      stu <- tryCatch(feed$stop_time_update, error = function(e) NULL)
-
-      if (!is.null(stu) && nrow(stu) > 0) {
         bal_ids <- marc_stops |>
-          filter(grepl("Baltimore", stop_name, ignore.case = TRUE)) |>
-          pull(stop_id)
+          filter(grepl("Baltimore",    stop_name, ignore.case = TRUE)) |>
+          pull(stop_id) |> as.character()
         was_ids <- marc_stops |>
           filter(grepl("Union Station", stop_name, ignore.case = TRUE) &
                    grepl("Washington",  stop_name, ignore.case = TRUE)) |>
-          pull(stop_id)
+          pull(stop_id) |> as.character()
 
         iso_utc <- function(x) {
-          if (is.null(x) || all(is.na(x))) return(rep(NA_character_, length(x)))
-          format(as.POSIXct(as.numeric(x), origin = "1970-01-01", tz = "UTC"),
-                 "%Y-%m-%dT%H:%M:%SZ")
+          ifelse(is.na(x) | x == "",
+                 NA_character_,
+                 format(as.POSIXct(as.numeric(x), origin = "1970-01-01", tz = "UTC"),
+                        "%Y-%m-%dT%H:%M:%SZ"))
         }
 
         stu_target <- stu |>
           filter(trip_id %in% marc_trips$trip_id,
                  stop_id %in% c(bal_ids, was_ids)) |>
-          left_join(marc_stops |> select(stop_id, stop_name), by = "stop_id") |>
+          left_join(marc_stops |> select(stop_id, stop_name) |>
+                      mutate(stop_id = as.character(stop_id)), by = "stop_id") |>
           left_join(marc_trips |> select(trip_id, route_id),  by = "trip_id")
 
         if (nrow(stu_target) > 0) {
-          has_dep_delay <- "departure_delay" %in% names(stu_target)
-          has_arr_delay <- "arrival_delay"   %in% names(stu_target)
-
           marc_rows <- stu_target |>
             transmute(
               service      = "marc",
@@ -108,12 +97,16 @@ collect_once <- function() {
               trip_date    = service_date,
               stop_id      = stop_id,
               stop_name    = stop_name,
-              sched_dep    = iso_utc(departure_time),
-              pred_dep     = iso_utc(if (has_dep_delay) departure_time + departure_delay
-                                     else departure_time),
-              sched_arr    = iso_utc(arrival_time),
-              pred_arr     = iso_utc(if (has_arr_delay) arrival_time + arrival_delay
-                                     else arrival_time),
+              sched_dep    = iso_utc(dep_time),
+              pred_dep     = iso_utc(ifelse(!is.na(dep_delay) & dep_delay != "",
+                                            as.character(as.numeric(dep_time) +
+                                                           as.numeric(dep_delay)),
+                                            dep_time)),
+              sched_arr    = iso_utc(arr_time),
+              pred_arr     = iso_utc(ifelse(!is.na(arr_delay) & arr_delay != "",
+                                            as.character(as.numeric(arr_time) +
+                                                           as.numeric(arr_delay)),
+                                            arr_time)),
               collected_at = collected_at
             )
           all_rows[["marc"]] <- marc_rows
@@ -121,8 +114,6 @@ collect_once <- function() {
         } else {
           cat("MARC: no Penn Line BAL/WAS stops in feed.\n")
         }
-      } else {
-        cat("MARC: no stop_time_update records.\n")
       }
     }
   }, error = function(e) cat("MARC error:", conditionMessage(e), "\n"))
