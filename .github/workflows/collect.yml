@@ -16,10 +16,18 @@ jobs:
         with:
           use-public-rspm: true
 
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pak
+          key: r-pak-${{ runner.os }}-v2
+          restore-keys: r-pak-${{ runner.os }}-
+
       - name: Install packages
         run: |
           Rscript -e '
-            install.packages("pak", repos = "https://r-lib.github.io/p/pak/stable/")
+            if (!requireNamespace("pak", quietly = TRUE))
+              install.packages("pak", repos = "https://r-lib.github.io/p/pak/stable/")
             pak::pkg_install(c("tidytransit", "httr2", "jsonlite", "dplyr", "readr", "lubridate"))
           '
 

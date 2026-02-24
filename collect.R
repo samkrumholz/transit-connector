@@ -1,6 +1,7 @@
 # collect.R
-# Runs every 10 min via GitHub Actions. Exits immediately outside collection windows.
-# Appends observations to data/YYYY-MM-DD.csv and commits via workflow.
+# Runs every ~10-25 min via GitHub Actions cron (jitter is normal).
+# Each invocation polls 3 times, 3 minutes apart, to compensate for jitter.
+# Exits immediately if outside collection windows.
 
 suppressPackageStartupMessages({
   library(httr2)
@@ -11,118 +12,93 @@ suppressPackageStartupMessages({
   library(lubridate)
 })
 
-# Null-coalescing operator
 `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0 && !is.na(a[[1]])) a else b
-
-# ---------------------------------------------------------------------------
-# 1. WINDOW CHECK
-# ---------------------------------------------------------------------------
-now  <- as.POSIXct(Sys.time(), tz = "UTC")
-wday <- as.integer(format(now, "%u"))   # 1=Mon … 7=Sun
-hhmm <- as.integer(format(now, "%H")) * 100L + as.integer(format(now, "%M"))
-
-in_window <- wday <= 5L &&
-  ((hhmm >= 1000L && hhmm < 1400L) ||
-   (hhmm >= 1900L && hhmm <= 2330L))
-
-if (!in_window) {
-  cat("Outside collection window (", format(now, "%a %H:%M UTC"), "). Exiting.\n")
-  quit(save = "no")
-}
-
-cat("Collection run:", format(now, "%Y-%m-%d %H:%M UTC"), "\n")
-
-# Service date = current Eastern time date
-et_now       <- with_tz(now, "America/New_York")
-service_date <- format(et_now, "%Y-%m-%d")
-collected_at <- format(now, "%Y-%m-%dT%H:%M:%SZ")
-
-# Output file
-dir.create("data", showWarnings = FALSE)
-out_file <- paste0("data/", service_date, ".csv")
 
 col_names <- c("service", "route_id", "trip_id", "trip_date",
                "stop_id", "stop_name", "sched_dep", "pred_dep",
                "sched_arr", "pred_arr", "collected_at")
 
-# Accumulate rows across services
-all_rows <- list()
+dir.create("data", showWarnings = FALSE)
 
 # ---------------------------------------------------------------------------
-# 2. MARC COLLECTION
+# WINDOW CHECK
 # ---------------------------------------------------------------------------
-marc_url <- "https://mdotmta-gtfs-rt.s3.amazonaws.com/MARC+RT/marc-tu.pb"
+in_window <- function(t = Sys.time()) {
+  t    <- as.POSIXct(t, tz = "UTC")
+  wday <- as.integer(format(t, "%u"))
+  hhmm <- as.integer(format(t, "%H")) * 100L + as.integer(format(t, "%M"))
+  wday <= 5L &&
+    ((hhmm >= 1000L && hhmm < 1400L) ||
+     (hhmm >= 1900L && hhmm <= 2330L))
+}
 
-tryCatch({
-  cat("Fetching MARC GTFS-RT feed...\n")
+if (!in_window()) {
+  t <- as.POSIXct(Sys.time(), tz = "UTC")
+  cat("Outside collection window (", format(t, "%a %H:%M UTC"), "). Exiting.\n")
+  quit(save = "no")
+}
 
-  resp <- request(marc_url) |>
-    req_timeout(30) |>
-    req_perform()
+# ---------------------------------------------------------------------------
+# COLLECTION FUNCTION — called once per poll iteration
+# ---------------------------------------------------------------------------
+collect_once <- function() {
+  now          <- as.POSIXct(Sys.time(), tz = "UTC")
+  et_now       <- with_tz(now, "America/New_York")
+  service_date <- format(et_now, "%Y-%m-%d")
+  collected_at <- format(now, "%Y-%m-%dT%H:%M:%SZ")
+  out_file     <- paste0("data/", service_date, ".csv")
+  all_rows     <- list()
 
-  raw_bytes <- resp_body_raw(resp)
+  cat("\n--- Poll at", format(now, "%H:%M:%S UTC"), "---\n")
 
-  if (length(raw_bytes) <= 20L) {
-    cat("MARC feed is empty (", length(raw_bytes), "bytes). Skipping.\n")
-  } else {
-    # Load trip reference
-    if (!file.exists("ref/marc_trips.csv")) {
-      warning("ref/marc_trips.csv not found — run identify_trips.R first. Skipping MARC.")
+  # --- MARC ---
+  marc_url <- "https://mdotmta-gtfs-rt.s3.amazonaws.com/MARC+RT/marc-tu.pb"
+  tryCatch({
+    resp      <- request(marc_url) |> req_timeout(30) |> req_perform()
+    raw_bytes <- resp_body_raw(resp)
+
+    if (length(raw_bytes) <= 20L) {
+      cat("MARC feed empty (", length(raw_bytes), "bytes).\n")
+    } else if (!file.exists("ref/marc_trips.csv")) {
+      cat("MARC: ref/marc_trips.csv missing — skipping.\n")
     } else {
       marc_trips <- read_csv("ref/marc_trips.csv", show_col_types = FALSE)
       marc_stops <- read_csv("ref/marc_stops.csv", show_col_types = FALSE)
 
-      # Write protobuf to temp file then parse
       tmp_pb <- tempfile(fileext = ".pb")
       writeBin(raw_bytes, tmp_pb)
 
       feed <- tryCatch(
         gtfs_rt_entities(tmp_pb, entity_type = "tu"),
-        error = function(e) {
-          # Fallback: try passing URL directly
-          tidytransit::read_gtfs_rt(marc_url, entity_type = "tu")
-        }
+        error = function(e) tidytransit::read_gtfs_rt(marc_url, entity_type = "tu")
       )
 
-      # feed is a list; trip updates are in $trip_update
-      # stop_time_update has: trip_id, stop_id, stop_sequence,
-      #   departure_time, arrival_time, departure_delay, arrival_delay
-      stu <- tryCatch(
-        feed$stop_time_update,
-        error = function(e) NULL
-      )
+      stu <- tryCatch(feed$stop_time_update, error = function(e) NULL)
 
-      if (is.null(stu) || nrow(stu) == 0) {
-        cat("MARC: no stop_time_update records parsed.\n")
-      } else {
-        # Filter to Penn Line trips
-        stu_penn <- stu |>
-          filter(trip_id %in% marc_trips$trip_id)
-
-        # Identify BAL and WAS stop_ids from ref
+      if (!is.null(stu) && nrow(stu) > 0) {
         bal_ids <- marc_stops |>
           filter(grepl("Baltimore", stop_name, ignore.case = TRUE)) |>
           pull(stop_id)
-
         was_ids <- marc_stops |>
           filter(grepl("Union Station", stop_name, ignore.case = TRUE) &
-                   grepl("Washington", stop_name, ignore.case = TRUE)) |>
+                   grepl("Washington",  stop_name, ignore.case = TRUE)) |>
           pull(stop_id)
 
-        target_stops <- c(bal_ids, was_ids)
+        iso_utc <- function(x) {
+          if (is.null(x) || all(is.na(x))) return(rep(NA_character_, length(x)))
+          format(as.POSIXct(as.numeric(x), origin = "1970-01-01", tz = "UTC"),
+                 "%Y-%m-%dT%H:%M:%SZ")
+        }
 
-        stu_target <- stu_penn |>
-          filter(stop_id %in% target_stops) |>
+        stu_target <- stu |>
+          filter(trip_id %in% marc_trips$trip_id,
+                 stop_id %in% c(bal_ids, was_ids)) |>
           left_join(marc_stops |> select(stop_id, stop_name), by = "stop_id") |>
-          left_join(marc_trips |> select(trip_id, route_id), by = "trip_id")
+          left_join(marc_trips |> select(trip_id, route_id),  by = "trip_id")
 
         if (nrow(stu_target) > 0) {
-          # Coerce times to ISO-8601; GTFS-RT times are Unix seconds
-          iso_utc <- function(x) {
-            if (is.null(x) || all(is.na(x))) return(rep(NA_character_, length(x)))
-            as.character(format(as.POSIXct(as.numeric(x), origin = "1970-01-01", tz = "UTC"),
-                                "%Y-%m-%dT%H:%M:%SZ"))
-          }
+          has_dep_delay <- "departure_delay" %in% names(stu_target)
+          has_arr_delay <- "arrival_delay"   %in% names(stu_target)
 
           marc_rows <- stu_target |>
             transmute(
@@ -133,124 +109,106 @@ tryCatch({
               stop_id      = stop_id,
               stop_name    = stop_name,
               sched_dep    = iso_utc(departure_time),
-              pred_dep     = iso_utc(if ("departure_delay" %in% names(stu_target) &&
-                                           !is.null(stu_target$departure_delay))
-                                        departure_time + departure_delay
+              pred_dep     = iso_utc(if (has_dep_delay) departure_time + departure_delay
                                      else departure_time),
               sched_arr    = iso_utc(arrival_time),
-              pred_arr     = iso_utc(if ("arrival_delay" %in% names(stu_target) &&
-                                           !is.null(stu_target$arrival_delay))
-                                        arrival_time + arrival_delay
+              pred_arr     = iso_utc(if (has_arr_delay) arrival_time + arrival_delay
                                      else arrival_time),
               collected_at = collected_at
             )
-
           all_rows[["marc"]] <- marc_rows
-          cat("MARC: captured", nrow(marc_rows), "stop observations.\n")
+          cat("MARC:", nrow(marc_rows), "observations.\n")
         } else {
-          cat("MARC: no Penn Line BAL/WAS stops in feed right now.\n")
+          cat("MARC: no Penn Line BAL/WAS stops in feed.\n")
+        }
+      } else {
+        cat("MARC: no stop_time_update records.\n")
+      }
+    }
+  }, error = function(e) cat("MARC error:", conditionMessage(e), "\n"))
+
+  # --- AMTRAK ---
+  tryCatch({
+    resp        <- request("https://api-v3.amtraker.com/v3/trains") |>
+      req_timeout(30) |>
+      req_headers(Accept = "application/json") |>
+      req_perform()
+    trains_json <- resp_body_json(resp, simplifyVector = FALSE)
+    amtrak_rows <- list()
+
+    for (train_num in names(trains_json)) {
+      for (train in trains_json[[train_num]]) {
+        route_name <- train$routeName %||% train$route_name %||% ""
+        if (!grepl("Northeast Regional|NER", route_name, ignore.case = TRUE)) next
+        stations <- train$stations
+        if (is.null(stations)) next
+        bal_st <- Filter(function(s) s$code == "BAL", stations)
+        was_st <- Filter(function(s) s$code == "WAS", stations)
+        if (length(bal_st) == 0 || length(was_st) == 0) next
+
+        for (st in c(bal_st, was_st)) {
+          amtrak_rows[[length(amtrak_rows) + 1]] <- tibble(
+            service      = "amtrak",
+            route_id     = "NER",
+            trip_id      = as.character(train_num),
+            trip_date    = service_date,
+            stop_id      = st$code,
+            stop_name    = switch(st$code,
+                             BAL = "Baltimore Penn Station",
+                             WAS = "Washington Union Station",
+                             st$code),
+            sched_dep    = as.character(st$schDep %||% NA),
+            pred_dep     = as.character(st$dep    %||% NA),
+            sched_arr    = as.character(st$schArr %||% NA),
+            pred_arr     = as.character(st$arr    %||% NA),
+            collected_at = collected_at
+          )
         }
       }
     }
-  }
-}, error = function(e) {
-  cat("MARC collection error:", conditionMessage(e), "\n")
-})
 
-# ---------------------------------------------------------------------------
-# 3. AMTRAK COLLECTION
-# ---------------------------------------------------------------------------
-amtrak_url <- "https://api-v3.amtraker.com/v3/trains"
-
-tryCatch({
-  cat("Fetching Amtrak data from Amtraker v3...\n")
-
-  resp <- request(amtrak_url) |>
-    req_timeout(30) |>
-    req_headers(Accept = "application/json") |>
-    req_perform()
-
-  trains_json <- resp_body_json(resp, simplifyVector = FALSE)
-
-  # trains_json is a named list: train_number -> list of train objects
-  amtrak_rows <- list()
-
-  for (train_num in names(trains_json)) {
-    train_list <- trains_json[[train_num]]
-    if (!is.list(train_list)) next
-
-    for (train in train_list) {
-      # Check if NER
-      route_name <- train$routeName %||% train$route_name %||% ""
-      if (!grepl("Northeast Regional|NER", route_name, ignore.case = TRUE)) next
-
-      stations <- train$stations
-      if (is.null(stations) || length(stations) == 0) next
-
-      # Find BAL and WAS stations
-      bal_st <- Filter(function(s) s$code == "BAL", stations)
-      was_st <- Filter(function(s) s$code == "WAS", stations)
-
-      if (length(bal_st) == 0 || length(was_st) == 0) next
-
-      for (st in c(bal_st, was_st)) {
-        stop_code <- st$code
-        stop_name_val <- switch(stop_code,
-          BAL = "Baltimore Penn Station",
-          WAS = "Washington Union Station",
-          stop_code
-        )
-
-        row <- tibble(
-          service      = "amtrak",
-          route_id     = "NER",
-          trip_id      = as.character(train_num),
-          trip_date    = service_date,
-          stop_id      = stop_code,
-          stop_name    = stop_name_val,
-          sched_dep    = as.character(st$schDep %||% NA),
-          pred_dep     = as.character(st$dep    %||% NA),
-          sched_arr    = as.character(st$schArr %||% NA),
-          pred_arr     = as.character(st$arr    %||% NA),
-          collected_at = collected_at
-        )
-        amtrak_rows[[length(amtrak_rows) + 1]] <- row
-      }
+    if (length(amtrak_rows) > 0) {
+      all_rows[["amtrak"]] <- bind_rows(amtrak_rows)
+      cat("Amtrak:", nrow(all_rows[["amtrak"]]), "observations.\n")
+    } else {
+      cat("Amtrak: no NER trains with BAL+WAS.\n")
     }
+  }, error = function(e) cat("Amtrak error:", conditionMessage(e), "\n"))
+
+  # --- WRITE ---
+  if (length(all_rows) == 0) {
+    cat("No data this poll.\n")
+    return(invisible(NULL))
   }
 
-  if (length(amtrak_rows) > 0) {
-    amtrak_tbl <- bind_rows(amtrak_rows)
-    all_rows[["amtrak"]] <- amtrak_tbl
-    cat("Amtrak: captured", nrow(amtrak_tbl), "stop observations.\n")
-  } else {
-    cat("Amtrak: no NER trains with both BAL and WAS found.\n")
+  combined <- bind_rows(all_rows)
+  for (col in col_names) {
+    if (!col %in% names(combined)) combined[[col]] <- NA_character_
   }
+  combined <- combined[, col_names]
 
-}, error = function(e) {
-  cat("Amtrak collection error:", conditionMessage(e), "\n")
-})
-
-# ---------------------------------------------------------------------------
-# 4. WRITE OUTPUT
-# ---------------------------------------------------------------------------
-if (length(all_rows) == 0) {
-  cat("No data collected this run.\n")
-  quit(save = "no")
+  file_exists <- file.exists(out_file)
+  write_csv(combined, out_file, append = file_exists, col_names = !file_exists)
+  cat("Wrote", nrow(combined), "rows to", out_file,
+      if (file_exists) "(appended)" else "(new file)", "\n")
 }
 
-combined <- bind_rows(all_rows)
+# ---------------------------------------------------------------------------
+# POLL LOOP — 3 iterations, 3 minutes apart
+# ---------------------------------------------------------------------------
+N_POLLS      <- 3L
+SLEEP_SEC    <- 180L   # 3 minutes
 
-# Ensure column order matches schema
-for (col in col_names) {
-  if (!col %in% names(combined)) combined[[col]] <- NA_character_
+for (i in seq_len(N_POLLS)) {
+  if (!in_window()) {
+    cat("Window closed after poll", i - 1L, "— stopping.\n")
+    break
+  }
+  collect_once()
+  if (i < N_POLLS) {
+    cat("Sleeping", SLEEP_SEC / 60, "min before next poll...\n")
+    Sys.sleep(SLEEP_SEC)
+  }
 }
-combined <- combined[, col_names]
 
-# Append to daily file (write header only if file doesn't exist)
-file_exists <- file.exists(out_file)
-write_csv(combined, out_file, append = file_exists, col_names = !file_exists)
-
-cat("Wrote", nrow(combined), "rows to", out_file,
-    if (file_exists) "(appended)" else "(new file)", "\n")
-cat("Done.\n")
+cat("\nDone.\n")
