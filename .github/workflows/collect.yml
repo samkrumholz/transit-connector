@@ -16,15 +16,12 @@ jobs:
         with:
           use-public-rspm: true
 
-      - name: Install system dependencies
-        run: sudo apt-get install -y libudunits2-dev libgdal-dev libgeos-dev libproj-dev
-
       - name: Install packages
         run: |
-          Rscript -e 'install.packages(
-            c("tidytransit", "httr2", "jsonlite", "dplyr", "readr", "lubridate"),
-            repos = "https://packagemanager.posit.co/cran/__linux__/jammy/latest"
-          )'
+          Rscript -e '
+            install.packages("pak", repos = "https://r-lib.github.io/p/pak/stable/")
+            pak::pkg_install(c("tidytransit", "httr2", "jsonlite", "dplyr", "readr", "lubridate"))
+          '
 
       - name: Collect
         run: Rscript collect.R
