@@ -120,6 +120,17 @@ collect_once <- function() {
   }, error = function(e) cat("MARC error:", conditionMessage(e), "\n"))
 
   # --- AMTRAK ---
+  # Convert Amtrak ISO-8601 strings (with ET offset) to UTC Z format
+  to_utc <- function(x) {
+    if (is.null(x) || length(x) == 0) return(NA_character_)
+    x <- as.character(x)
+    if (is.na(x) || x == "") return(NA_character_)
+    tryCatch(
+      format(lubridate::as_datetime(x), "%Y-%m-%dT%H:%M:%SZ"),
+      error = function(e) x
+    )
+  }
+
   tryCatch({
     resp        <- request("https://api-v3.amtraker.com/v3/trains") |>
       req_timeout(30) |>
@@ -149,10 +160,10 @@ collect_once <- function() {
                              BAL = "Baltimore Penn Station",
                              WAS = "Washington Union Station",
                              st$code),
-            sched_dep    = as.character(st$schDep %||% NA),
-            pred_dep     = as.character(st$dep    %||% NA),
-            sched_arr    = as.character(st$schArr %||% NA),
-            pred_arr     = as.character(st$arr    %||% NA),
+            sched_dep    = to_utc(st$schDep %||% NA),
+            pred_dep     = to_utc(st$dep    %||% NA),
+            sched_arr    = to_utc(st$schArr %||% NA),
+            pred_arr     = to_utc(st$arr    %||% NA),
             collected_at = collected_at
           )
         }
