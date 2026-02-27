@@ -47,6 +47,15 @@ was_stops <- stops |>
 cat("Baltimore stop candidates:\n"); print(bal_stops[, c("stop_id", "stop_name")])
 cat("Washington stop candidates:\n"); print(was_stops[, c("stop_id", "stop_name")])
 
+# Print ALL Penn Line stops so we can identify the correct Baltimore Penn stop name
+cat("\nAll Penn Line stops:\n")
+all_penn_stops <- stop_times |>
+  filter(trip_id %in% penn_trips$trip_id) |>
+  distinct(stop_id) |>
+  left_join(stops |> select(stop_id, stop_name), by = "stop_id") |>
+  arrange(stop_name)
+print(all_penn_stops, n = Inf)
+
 # Keep trips that serve both BAL and WAS stops
 penn_stop_times <- stop_times |>
   filter(trip_id %in% penn_trips$trip_id)
