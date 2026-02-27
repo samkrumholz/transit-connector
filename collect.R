@@ -98,16 +98,19 @@ collect_once <- function() {
               trip_date    = service_date,
               stop_id      = stop_id,
               stop_name    = stop_name,
-              sched_dep    = iso_utc(dep_time),
-              pred_dep     = iso_utc(ifelse(!is.na(dep_delay) & dep_delay != "",
-                                            as.character(as.numeric(dep_time) +
+              # dep_time / arr_time from GTFS-RT are predicted absolute times (Unix sec).
+              # dep_delay / arr_delay are seconds of delay relative to schedule.
+              # So: sched = predicted - delay; pred = predicted (no double-adding).
+              sched_dep    = iso_utc(ifelse(!is.na(dep_delay) & dep_delay != "",
+                                            as.character(as.numeric(dep_time) -
                                                            as.numeric(dep_delay)),
                                             dep_time)),
-              sched_arr    = iso_utc(arr_time),
-              pred_arr     = iso_utc(ifelse(!is.na(arr_delay) & arr_delay != "",
-                                            as.character(as.numeric(arr_time) +
+              pred_dep     = iso_utc(dep_time),
+              sched_arr    = iso_utc(ifelse(!is.na(arr_delay) & arr_delay != "",
+                                            as.character(as.numeric(arr_time) -
                                                            as.numeric(arr_delay)),
                                             arr_time)),
+              pred_arr     = iso_utc(arr_time),
               collected_at = collected_at
             )
           all_rows[["marc"]] <- marc_rows
