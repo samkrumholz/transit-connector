@@ -67,7 +67,7 @@ collect_once <- function() {
                         col_types = cols(.default = col_character()))
 
         bal_ids <- marc_stops |>
-          filter(grepl("Baltimore",    stop_name, ignore.case = TRUE)) |>
+          filter(grepl("Penn Station", stop_name, ignore.case = TRUE)) |>
           pull(stop_id) |> as.character()
         was_ids <- marc_stops |>
           filter(grepl("Union Station", stop_name, ignore.case = TRUE) &
