@@ -15,7 +15,11 @@ suppressPackageStartupMessages({
 
 col_names <- c("service", "route_id", "trip_id", "trip_date",
                "stop_id", "stop_name", "sched_dep", "pred_dep",
-               "sched_arr", "pred_arr", "collected_at")
+               "sched_arr", "pred_arr", "collected_at", "drive_min")
+
+# Fixed coordinates
+BAL_LAT  <- 39.32215;  BAL_LON  <- -76.61873   # 2836 Maryland Ave Baltimore
+DC_LAT   <- 38.89936;  DC_LON   <- -77.01264   # Judiciary Square DC
 
 dir.create("data", showWarnings = FALSE)
 
@@ -49,6 +53,27 @@ collect_once <- function() {
   all_rows     <- list()
 
   cat("\n--- Poll at", format(now, "%H:%M:%S UTC"), "---\n")
+
+  # --- DRIVING TIME (TomTom Routing API) ---
+  hhmm     <- as.integer(format(now, "%H")) * 100L + as.integer(format(now, "%M"))
+  am_win   <- hhmm >= 1000L && hhmm < 1400L   # BAL -> DC
+  origin   <- if (am_win) sprintf("%f,%f", BAL_LAT, BAL_LON) else sprintf("%f,%f", DC_LAT, DC_LON)
+  dest     <- if (am_win) sprintf("%f,%f", DC_LAT, DC_LON)   else sprintf("%f,%f", BAL_LAT, BAL_LON)
+  drive_min <- tryCatch({
+    api_key <- Sys.getenv("TOMTOM_API_KEY")
+    resp <- request(sprintf(
+      "https://api.tomtom.com/routing/1/calculateRoute/%s:%s/json",
+      origin, dest)) |>
+      req_url_query(key = api_key, traffic = "true", travelMode = "car") |>
+      req_timeout(15) |>
+      req_perform()
+    secs <- resp_body_json(resp)$routes[[1]]$summary$travelTimeInSeconds
+    round(secs / 60, 1)
+  }, error = function(e) {
+    cat("TomTom error:", conditionMessage(e), "\n")
+    NA_real_
+  })
+  cat("Drive time", if (am_win) "BAL->DC" else "DC->BAL", ":", drive_min, "min\n")
 
   # --- MARC (parsed via Python gtfs-realtime-bindings) ---
   tryCatch({
@@ -111,7 +136,8 @@ collect_once <- function() {
                                                            as.numeric(arr_delay)),
                                             arr_time)),
               pred_arr     = iso_utc(arr_time),
-              collected_at = collected_at
+              collected_at = collected_at,
+              drive_min    = drive_min
             )
           all_rows[["marc"]] <- marc_rows
           cat("MARC:", nrow(marc_rows), "observations.\n")
@@ -167,7 +193,8 @@ collect_once <- function() {
             pred_dep     = to_utc(st$dep    %||% NA),
             sched_arr    = to_utc(st$schArr %||% NA),
             pred_arr     = to_utc(st$arr    %||% NA),
-            collected_at = collected_at
+            collected_at = collected_at,
+            drive_min    = drive_min
           )
         }
       }

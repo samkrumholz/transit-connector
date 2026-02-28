@@ -35,6 +35,8 @@ jobs:
         run: pip install gtfs-realtime-bindings
 
       - name: Collect
+        env:
+          TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
         run: Rscript collect.R
 
       - name: Commit data
